@@ -216,7 +216,7 @@ Published image:
 
 ```
 docker pull turzaiftiak/gridwise-optimizer:latest
-# digest: sha256:050444881ea59bed8d7aad4561af12512ff8dfb362598f50ae6632bd6f50d0ed
+# digest: sha256:372c66f80764f6c82465001ebc5a727dc1709193f9a77c6d6f8cf8cf670f847b
 ```
 
 Verified locally: built with `docker build`, run with `docker run -p 8000:8000`, and
