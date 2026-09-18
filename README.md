@@ -14,7 +14,7 @@ solves an exact linear program to produce a minimum-cost, constraint-valid 24-ho
 Energy Data + Operator Notes
         |
         v
-  LLM Interpreter        <- Groq (GPT-OSS 120B by default)
+  LLM Interpreter        <- Groq (GPT-OSS 120B), Gemini (3.1 Flash-Lite) secondary
         |                    the ONLY component allowed to decide what a note means
         v
   Guardrail Validator     <- deterministic Python; forces malformed/unsupported output
@@ -30,9 +30,11 @@ Energy Data + Operator Notes
 ```
 
 - **`app/llm_interpreter.py`** — the mandatory LLM step (Participant Guide Sec. 04). Sends all
-  of a scenario's operator notes to the LLM in one call and asks for strict JSON back. This is
-  the only place that performs natural-language understanding; nothing downstream re-interprets
-  the notes.
+  of a scenario's operator notes to the LLM in one call and asks for strict JSON back. Tries
+  **Groq first, then Gemini** if Groq fails (rate limit/timeout/outage) — so a single-provider
+  hiccup still keeps a real language model on the interpretation path instead of dropping
+  straight to the deterministic heuristic. This is the only place that performs
+  natural-language understanding; nothing downstream re-interprets the notes.
 - **`app/guardrails.py`** — treats the LLM's JSON as untrusted. Every entry is checked against
   the exact required shape (directive type, hours, numeric ranges) from the Problem Statement;
   anything that fails is demoted to `no_op` rather than passed through.
@@ -52,16 +54,21 @@ Energy Data + Operator Notes
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `GROQ_API_KEY` | Yes | — | API key for the LLM used to interpret `operator_notes`. Free, no card required — get one at [console.groq.com/keys](https://console.groq.com/keys). |
-| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Model id for interpretation. |
-| `LLM_TIMEOUT_SECONDS` | No | `12` | Per-call timeout budget for the LLM request. |
+| `GROQ_API_KEY` | Yes | — | API key for the primary LLM. Free, no card required — get one at [console.groq.com/keys](https://console.groq.com/keys). |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Model id for the primary provider. |
+| `GEMINI_API_KEY` | No | — | API key for the secondary LLM, tried only if Groq fails. Free, no card required — get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). |
+| `GEMINI_MODEL` | No | `gemini-3.1-flash-lite` | Model id for the secondary provider. |
+| `GROQ_TIMEOUT_SECONDS` | No | `6` | Timeout budget for the Groq attempt. |
+| `GEMINI_TIMEOUT_SECONDS` | No | `18` | Timeout budget for the Gemini attempt (only reached if Groq fails). |
 | `PORT` | No | `8000` | Port the HTTP server binds to. |
 
-Copy `.env.example` to `.env` and fill in `GROQ_API_KEY`. **Never commit `.env`.**
+Copy `.env.example` to `.env` and fill in `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`).
+**Never commit `.env`.**
 
 ## LLM role & guardrails (summary)
 
-The LLM (GPT-OSS 120B via Groq) is given the directive-type spec and every operator note in one
+The LLM (Groq's GPT-OSS 120B, falling back to Gemini 3.1 Flash-Lite if Groq fails) is given
+the directive-type spec and every operator note in one
 call, and returns one structured interpretation per note as JSON. Its output is never trusted
 directly:
 
@@ -188,10 +195,12 @@ judge timeout.
 # Build
 docker build -t gridwise-optimizer:latest .
 
-# Run (no secrets baked into the image — pass the key at runtime)
+# Run (no secrets baked into the image — pass the key(s) at runtime)
 docker run --rm -p 8000:8000 \
-  -e GROQ_API_KEY=your_key_here \
+  -e GROQ_API_KEY=your_groq_key_here \
   -e GROQ_MODEL=openai/gpt-oss-120b \
+  -e GEMINI_API_KEY=your_gemini_key_here \
+  -e GEMINI_MODEL=gemini-3.1-flash-lite \
   gridwise-optimizer:latest
 
 # Verify
@@ -216,18 +225,19 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
 
 - [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) — HTTP service.
 - [Pydantic v2](https://docs.pydantic.dev/) — request/response schema validation.
-- [Groq API](https://console.groq.com/docs) (OpenAI-compatible, called via `httpx`) — LLM calls.
+- [Groq API](https://console.groq.com/docs) (OpenAI-compatible, called via `httpx`) — primary LLM.
+- [Gemini API](https://ai.google.dev/) (called via `httpx`) — secondary LLM, used only if Groq fails.
 - [PuLP](https://coin-or.github.io/pulp/) + CBC — the deterministic LP optimizer/solver.
 - [python-dotenv](https://github.com/theskumar/python-dotenv) — loads `.env` locally.
 
 ## Known limitations
 
 - **Fallback interpreter is a safety net, not a substitute for the LLM.** It only activates
-  when the Groq API call itself fails (bad/missing key, network/timeout error, non-JSON
-  response). It uses simple regex/keyword matching and will not generalize to arbitrary
-  paraphrasing the way the LLM does — its purpose is solely to avoid a 5xx / crash during a
-  provider outage. It is disabled (never invoked) whenever the LLM call succeeds. Every entry
-  it emits is tagged in `explanation` for auditability.
+  when BOTH Groq and Gemini fail (bad/missing key, network/timeout error, non-JSON response).
+  It uses simple regex/keyword matching and will not generalize to arbitrary paraphrasing the
+  way the LLM does — its purpose is solely to avoid a 5xx / crash during a total provider
+  outage. It is disabled (never invoked) whenever either LLM call succeeds. Every entry it
+  emits is tagged in `explanation` for auditability.
 - **Overlapping directives of the same type** (e.g. two `solar_reduction` notes touching the
   same hour) are composed conservatively: `solar_reduction` factors multiply, and
   `minimum_battery_reserve` / `max_grid_window` take the most restrictive (max / min) value
@@ -242,13 +252,14 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
   detail server-side only.
 - **Free-tier Groq rate limit.** The default free `on_demand` tier caps `openai/gpt-oss-120b`
   at 8000 tokens/minute (~6-8 interpretation calls/minute at this prompt size). A burst of
-  requests beyond that returns HTTP 429 from Groq, which is treated the same as any other LLM
-  outage: the deterministic fallback interpreter takes over for that request only (tagged in
-  `explanation`), so the service still returns a valid 200 response rather than failing. Upgrade
-  to a paid/dev tier on console.groq.com for higher throughput if sustained high request rates
-  are expected during judging.
+  requests beyond that returns HTTP 429 from Groq; the Gemini secondary provider absorbs most
+  of this (still a real LLM interpretation), and only if Gemini also fails does the
+  deterministic fallback interpreter take over for that one request (tagged in `explanation`),
+  so the service always returns a valid 200 response rather than failing. Upgrade to a paid/dev
+  tier on console.groq.com for higher throughput if sustained high request rates are expected.
 
 ## Credits
 
-Built with FastAPI, PuLP/CBC, and the Groq API (GPT-OSS 120B). Core architecture, prompt design,
+Built with FastAPI, PuLP/CBC, and the Groq (GPT-OSS 120B) / Gemini (3.1 Flash-Lite) APIs.
+Core architecture, prompt design,
 guardrail logic, LP formulation, and validator are original work for this challenge.

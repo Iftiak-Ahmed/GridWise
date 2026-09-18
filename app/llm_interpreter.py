@@ -4,22 +4,34 @@ This module is the ONLY place that is allowed to decide what an operator note *m
 Everything downstream (guardrails.py, optimizer.py) treats its output as untrusted
 structured data (Problem Statement Sec. 08) and validates it before use.
 
-If the provider call itself fails (network error, timeout, auth failure, rate limit),
-`interpret_notes` raises `LLMUnavailableError` so the caller can invoke the deterministic
-safety-net fallback (fallback_interpreter.py) instead of crashing the request. That
-fallback exists purely for provider-outage robustness, never as the primary interpreter.
+Two hosted LLM providers are tried in order (Groq, then Gemini) so a rate limit or outage
+on one still leaves a real language model on the interpretation path instead of dropping
+straight to the deterministic heuristic. `interpret_notes` raises `LLMUnavailableError` only
+if BOTH providers fail, so the caller can invoke the deterministic safety-net fallback
+(fallback_interpreter.py) instead of crashing the request. That fallback exists purely for
+total-outage robustness, never as a primary interpreter.
 """
 from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
-from app.config import GROQ_API_KEY, GROQ_MODEL, LLM_TIMEOUT_SECONDS
+from app.config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GEMINI_TIMEOUT_SECONDS,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_TIMEOUT_SECONDS,
+)
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_GENERATE_URL_TEMPLATE = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 
 SYSTEM_PROMPT = """You are the operator-note interpretation engine for GridWise, a campus \
 energy scheduling system. You convert short natural-language operator notes into strict \
@@ -72,7 +84,7 @@ from 0 to N-1 exactly once."""
 
 
 class LLMUnavailableError(RuntimeError):
-    """Raised when the LLM provider call fails and could not be recovered."""
+    """Raised when every configured LLM provider call fails and could not be recovered."""
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -91,13 +103,20 @@ def _build_user_message(operator_notes: list[str], battery_capacity_kwh: float) 
     )
 
 
-def interpret_notes(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
-    """Calls the LLM once for all notes in a scenario and returns raw (untrusted) entries.
+def _parse_interpretations(raw_text: str, provider: str) -> list[dict[str, Any]]:
+    cleaned = _strip_fences(raw_text)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise LLMUnavailableError(f"{provider} returned non-JSON output: {exc}") from exc
 
-    Raises LLMUnavailableError on any provider-level failure. Raises ValueError if the
-    provider responded but the payload could not be parsed as JSON at all (also treated
-    by the caller as a reason to fall back, since we must never invent data ourselves).
-    """
+    interpretations = parsed.get("interpretations")
+    if not isinstance(interpretations, list):
+        raise LLMUnavailableError(f"{provider} JSON payload missing 'interpretations' array")
+    return interpretations
+
+
+def _call_groq(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
     if not GROQ_API_KEY:
         raise LLMUnavailableError("GROQ_API_KEY is not configured")
 
@@ -117,30 +136,77 @@ def interpret_notes(operator_notes: list[str], battery_capacity_kwh: float) -> l
             GROQ_CHAT_COMPLETIONS_URL,
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json=payload,
-            timeout=LLM_TIMEOUT_SECONDS,
+            timeout=GROQ_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         raise LLMUnavailableError(
             f"Groq API error: HTTP {exc.response.status_code} {exc.response.text[:200]}"
         ) from exc
-    except Exception as exc:  # noqa: BLE001 - any transport/timeout failure -> fallback path
-        raise LLMUnavailableError(f"LLM call failed: {exc.__class__.__name__}") from exc
+    except Exception as exc:  # noqa: BLE001 - any transport/timeout failure -> next provider
+        raise LLMUnavailableError(f"Groq call failed: {exc.__class__.__name__}") from exc
 
     try:
         raw_text = response.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise LLMUnavailableError(f"Groq response missing expected content: {exc}") from exc
 
-    cleaned = _strip_fences(raw_text)
+    return _parse_interpretations(raw_text, "Groq")
+
+
+def _call_gemini(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
+    if not GEMINI_API_KEY:
+        raise LLMUnavailableError("GEMINI_API_KEY is not configured")
+
+    user_message = _build_user_message(operator_notes, battery_capacity_kwh)
+    payload = {
+        "contents": [{"parts": [{"text": SYSTEM_PROMPT + "\n\n" + user_message}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "thinkingConfig": {"thinkingBudget": 0},
+            "responseMimeType": "application/json",
+        },
+    }
+    url = GEMINI_GENERATE_URL_TEMPLATE.format(model=GEMINI_MODEL)
 
     try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise LLMUnavailableError(f"LLM returned non-JSON output: {exc}") from exc
+        response = httpx.post(
+            url,
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=GEMINI_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise LLMUnavailableError(
+            f"Gemini API error: HTTP {exc.response.status_code} {exc.response.text[:200]}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - any transport/timeout failure -> next provider
+        raise LLMUnavailableError(f"Gemini call failed: {exc.__class__.__name__}") from exc
 
-    interpretations = parsed.get("interpretations")
-    if not isinstance(interpretations, list):
-        raise LLMUnavailableError("LLM JSON payload missing 'interpretations' array")
+    try:
+        raw_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise LLMUnavailableError(f"Gemini response missing expected content: {exc}") from exc
 
-    return interpretations
+    return _parse_interpretations(raw_text, "Gemini")
+
+
+_PROVIDERS: list[Callable[[list[str], float], list[dict[str, Any]]]] = [_call_groq, _call_gemini]
+
+
+def interpret_notes(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
+    """Calls each configured LLM provider in order until one succeeds.
+
+    Tries Groq first, then Gemini, so a rate limit or transient outage on one provider still
+    leaves a real language model on the interpretation path. Raises LLMUnavailableError only
+    if every provider call fails, so the caller can invoke the deterministic fallback.
+    """
+    errors: list[str] = []
+    for call in _PROVIDERS:
+        try:
+            return call(operator_notes, battery_capacity_kwh)
+        except LLMUnavailableError as exc:
+            errors.append(str(exc))
+
+    raise LLMUnavailableError("All LLM providers failed: " + " | ".join(errors))

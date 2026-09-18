@@ -10,5 +10,11 @@ services:
         sync: false
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b
-      - key: LLM_TIMEOUT_SECONDS
-        value: "12"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite
+      - key: GROQ_TIMEOUT_SECONDS
+        value: "6"
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "18"
