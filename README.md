@@ -199,11 +199,15 @@ The image binds to `0.0.0.0:${PORT}` (default `8000`), matches the documented po
 contains no baked-in credentials — `ANTHROPIC_API_KEY` must be supplied via `-e` or your
 platform's secret-injection mechanism at runtime.
 
-> **Before submitting:** push this image to a registry (Docker Hub / GHCR) and record the
-> exact tag or digest here, e.g.:
-> `docker pull <registry>/<you>/gridwise-optimizer:<tag>`
-> This repo was authored without a local Docker daemon available, so build/push/pull the
-> image at least once yourself before the deadline to confirm it works end-to-end.
+Published image:
+
+```
+docker pull turzaiftiak/gridwise-optimizer:latest
+# digest: sha256:4a5d4b9249b0172f5eaad804274b98842e9c91d243f8ee4242a49cced86e6b25
+```
+
+Verified locally: built with `docker build`, run with `docker run -p 8000:8000`, and
+`GET /health` returned `{"status":"ok"}` before pushing.
 
 ## Dependencies
 
