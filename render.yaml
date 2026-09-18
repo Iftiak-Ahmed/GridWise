@@ -15,6 +15,6 @@ services:
       - key: GEMINI_MODEL
         value: gemini-3.1-flash-lite
       - key: GROQ_TIMEOUT_SECONDS
-        value: "6"
+        value: "5"
       - key: GEMINI_TIMEOUT_SECONDS
-        value: "18"
+        value: "15"

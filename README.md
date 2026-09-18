@@ -52,8 +52,8 @@ flowchart TD
 | `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Model id for the primary provider. |
 | `GEMINI_API_KEY` | No | — | API key for the secondary LLM, tried only if Groq fails. Free, no card required — get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). |
 | `GEMINI_MODEL` | No | `gemini-3.1-flash-lite` | Model id for the secondary provider. |
-| `GROQ_TIMEOUT_SECONDS` | No | `6` | Timeout budget for the Groq attempt. |
-| `GEMINI_TIMEOUT_SECONDS` | No | `18` | Timeout budget for the Gemini attempt (only reached if Groq fails). |
+| `GROQ_TIMEOUT_SECONDS` | No | `5` | Timeout budget for the Groq attempt. |
+| `GEMINI_TIMEOUT_SECONDS` | No | `15` | Timeout budget for the Gemini attempt (only reached if Groq fails). Worst case 5+15=20s, leaving ~10s margin under the 30s judge per-request timeout. |
 | `PORT` | No | `8000` | Port the HTTP server binds to. |
 
 Copy `.env.example` to `.env` and fill in `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`).
