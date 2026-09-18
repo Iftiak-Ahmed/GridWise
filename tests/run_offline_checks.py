@@ -42,8 +42,9 @@ def main() -> int:
         hours = req["hours"]
         battery = req["battery"]
         notes = req["operator_notes"]
-        ground_truth = case["ground_truth_directives"]
-        reference_cost = case["reference_total_cost_bdt"]
+        expected = case["expected_output"]
+        ground_truth = expected["directive_interpretation"]
+        reference_cost = expected["total_cost_bdt"]
 
         # Simulate a perfect LLM by feeding ground truth through the same guardrail path
         # every real request uses, then solve and replay exactly like the live service.
@@ -56,6 +57,16 @@ def main() -> int:
 
         ok = True
         messages = []
+
+        # Sanity-check our own validator against the OFFICIAL reference schedule itself:
+        # if our validator ever flagged the organizer's own valid plan as violating a
+        # constraint, that would mean our validator (and by extension our optimizer's
+        # constraints) diverge from the official rules.
+        reference_violations = validator.replay(hours, battery, ground_truth, expected["hourly_plan"])
+        if reference_violations:
+            ok = False
+            messages.append("validator disagrees with the OFFICIAL reference schedule:")
+            messages.extend(f"  ! {v}" for v in reference_violations)
 
         if plan is None:
             ok = False
@@ -74,6 +85,10 @@ def main() -> int:
                 f"cost: ours={our_cost:.2f} BDT, reference={reference_cost:.2f} BDT, "
                 f"quality_ratio={quality:.4f}"
             )
+            for field in ("total_grid_kwh", "peak_grid_kwh"):
+                ours, ref = totals[field], expected[field]
+                if abs(ours - ref) > max(0.01, ref * 0.001):
+                    messages.append(f"note: {field} ours={ours:.2f} vs reference={ref:.2f} (differs, but an equivalent optimal schedule need not match)")
 
         # Confirm directive_interpretation coverage/shape guardrails.
         if len(directive_interpretation) != len(notes):

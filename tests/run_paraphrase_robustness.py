@@ -107,7 +107,7 @@ def main() -> int:
     passed = 0
     for case in cases:
         capacity = case["input"]["battery"]["capacity_kwh"]
-        for truth in case["ground_truth_directives"]:
+        for truth in case["expected_output"]["directive_interpretation"]:
             note = case["input"]["operator_notes"][truth["note_index"]]
             try:
                 paraphrases = _generate_paraphrases(note, args.per_note)

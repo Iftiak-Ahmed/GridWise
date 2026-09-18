@@ -61,14 +61,18 @@ def main() -> int:
         violations = validator.replay(req["hours"], req["battery"], directive_interpretation, plan)
 
         note_count_ok = len(directive_interpretation) == len(req["operator_notes"])
-        status = "PASS" if not violations and note_count_ok else "FAIL"
+        ref_cost = case["expected_output"]["total_cost_bdt"]
+        cost_ok = abs(body["total_cost_bdt"] - ref_cost) <= max(0.01, ref_cost * 0.001)
+        status = "PASS" if not violations and note_count_ok and cost_ok else "FAIL"
         if status == "PASS":
             passed += 1
-        print(f"[{status}] {case['id']} ({elapsed:.2f}s) cost={body['total_cost_bdt']:.2f} BDT")
+        print(f"[{status}] {case['id']} ({elapsed:.2f}s) cost={body['total_cost_bdt']:.2f} BDT (ref {ref_cost})")
         for v in violations:
             print(f"    - {v}")
         if not note_count_ok:
             print(f"    - expected {len(req['operator_notes'])} interpretation entries, got {len(directive_interpretation)}")
+        if not cost_ok:
+            print(f"    - cost {body['total_cost_bdt']} does not match reference {ref_cost} within tolerance")
 
     print(f"\n{passed}/{len(cases)} cases passed end-to-end.")
     return 0 if passed == len(cases) else 1
