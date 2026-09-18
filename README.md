@@ -190,6 +190,12 @@ access and a valid key; last verified run of (4): **46/48 (95.8%) freshly-genera
 paraphrases** resolved to the correct ground-truth directive — the 2 misses were both
 simultaneous Groq+Gemini rate-limit/availability errors, not interpretation mistakes.
 
+**Live deployment verified end-to-end** (last run against `https://gridwise-optimizer.onrender.com`):
+all 10 public samples returned the correct cost with the real LLM path, 3 malformed-input
+cases (invalid JSON, missing fields, wrong top-level type) all returned a clean `400` with no
+stack trace leak, and **p95 latency was 1.88s / max 1.94s** — well inside the 5s tier for full
+latency credit and far under the 30s per-request judge timeout.
+
 ## Docker fallback image
 
 ```bash
@@ -258,6 +264,9 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
   deterministic fallback interpreter take over for that one request (tagged in `explanation`),
   so the service always returns a valid 200 response rather than failing. Upgrade to a paid/dev
   tier on console.groq.com for higher throughput if sustained high request rates are expected.
+  A 20-request burst test against `gemini-3.1-flash-lite` found no comparable hard per-minute
+  quota — occasional failures there were transient upstream 503s/timeouts rather than a rate
+  limit, so Gemini rarely fails at the same moment Groq is rate-limited.
 
 ## Credits
 
