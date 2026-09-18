@@ -25,10 +25,8 @@ flowchart TD
 
 - **`app/llm_interpreter.py`** — the mandatory LLM step (Participant Guide Sec. 04). Sends all
   of a scenario's operator notes to the LLM in one call and asks for strict JSON back. Tries
-  **Groq first, then Gemini** if Groq fails (rate limit/timeout/outage) — so a single-provider
-  hiccup still keeps a real language model on the interpretation path instead of dropping
-  straight to the deterministic heuristic. This is the only place that performs
-  natural-language understanding; nothing downstream re-interprets the notes.
+  **Groq first, then Gemini** if Groq fails (rate limit/timeout/outage). This is the only place
+  that performs natural-language understanding; nothing downstream re-interprets the notes.
 - **`app/guardrails.py`** — treats the LLM's JSON as untrusted. Every entry is checked against
   the exact required shape (directive type, hours, numeric ranges) from the Problem Statement;
   anything that fails is demoted to `no_op` rather than passed through.
@@ -36,13 +34,11 @@ flowchart TD
   `sum(grid_kwh[h] * tariff_bdt_per_kwh[h])` subject to energy balance, battery bounds/rate
   limits, effective solar, and every validated directive, solved exactly with the CBC solver.
 - **`app/validator.py`** — replays the returned plan the same way the judge is described as
-  doing, so any internal inconsistency is caught before responding (and is reused by the test
-  suite to check the optimizer against the public sample pack).
+  doing, so any internal inconsistency is caught before responding.
 - **`app/fallback_interpreter.py`** — a small regex/keyword safety net used **only** when the
   LLM call itself fails (timeout, missing key, provider outage, non-JSON response). It is never
-  the primary interpreter and every entry it produces is tagged
-  `[fallback-heuristic: LLM unavailable]` in the response's `explanation` field so it's
-  auditable. See **Known Limitations** below.
+  the primary interpreter and tags its entries as `[fallback-heuristic: LLM unavailable]` in
+  the response's `explanation` field.
 
 ## Environment variables
 
@@ -53,7 +49,7 @@ flowchart TD
 | `GEMINI_API_KEY` | No | — | API key for the secondary LLM, tried only if Groq fails. Free, no card required — get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). |
 | `GEMINI_MODEL` | No | `gemini-3.1-flash-lite` | Model id for the secondary provider. |
 | `GROQ_TIMEOUT_SECONDS` | No | `5` | Timeout budget for the Groq attempt. |
-| `GEMINI_TIMEOUT_SECONDS` | No | `15` | Timeout budget for the Gemini attempt (only reached if Groq fails). Worst case 5+15=20s, leaving ~10s margin under the 30s judge per-request timeout. |
+| `GEMINI_TIMEOUT_SECONDS` | No | `15` | Timeout budget for the Gemini attempt, only reached if Groq fails. |
 | `PORT` | No | `8000` | Port the HTTP server binds to. |
 
 Copy `.env.example` to `.env` and fill in `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`).
@@ -61,10 +57,8 @@ Copy `.env.example` to `.env` and fill in `GROQ_API_KEY` (and optionally `GEMINI
 
 ## LLM role & guardrails (summary)
 
-The LLM (Groq's GPT-OSS 120B, falling back to Gemini 3.1 Flash-Lite if Groq fails) is given
-the directive-type spec and every operator note in one
-call, and returns one structured interpretation per note as JSON. Its output is never trusted
-directly:
+The LLM receives the directive-type spec and every operator note in one call, then returns one
+structured interpretation per note as JSON. Its output is validated before optimization:
 
 - `directive_type` must be one of the six supported types, else the entry becomes `no_op`.
 - `hours` must be unique ascending integers 0-23.
@@ -77,25 +71,19 @@ directly:
 - `no_op` ⇔ `applies=false` and `structured_adjustment=null`; every other directive requires
   `applies=true`.
 
-Only interpretations that pass all of the above ever reach the optimizer.
-
 ## Optimizer & solver
 
 - **Library:** [PuLP](https://coin-or.github.io/pulp/) with the bundled CBC solver (open
-  source, no external service, solves in well under a second for this problem size).
+  source and local to the service).
 - **Formulation:** one LP per request — `grid`, `solar_used`, `charge`, `discharge`, and
   `battery_energy` variables for each of the 24 hours, with hard constraints for energy
   balance, battery bounds/rate limits, effective solar (after `solar_reduction`), reserve
   floors (`minimum_battery_reserve`), forced-zero charge/discharge windows, grid caps
-  (`max_grid_window`), and end-of-day neutrality. A negligible cycling-regularization term
-  (1e-6 per kWh) discourages pointless simultaneous charge+discharge in degenerate optima
-  without measurably affecting cost.
-- **Infeasibility fallback:** organizer-valid scoring scenarios are guaranteed feasible, but
-  malformed/adversarial hidden input could combine into infeasible constraints. If the fully
-  constrained LP is infeasible, directive groups are progressively relaxed
-  (`max_grid_window` → `minimum_battery_reserve` → `no_discharge_window` → `no_charge_window`
-  → `solar_reduction`) until a valid schedule exists, and `plan_summary` says so — this trades
-  a small amount of correctness credit on a malformed case for never returning a 500 or crash.
+  (`max_grid_window`), and end-of-day neutrality. A cycling-regularization term is included.
+- **Infeasibility fallback:** if constraints are infeasible, directive groups are progressively
+  relaxed (`max_grid_window` → `minimum_battery_reserve` → `no_discharge_window` →
+  `no_charge_window` → `solar_reduction`) until a valid schedule exists, and `plan_summary`
+  reports the fallback.
 
 ## Local quickstart
 
@@ -159,42 +147,10 @@ EOF
 Full worked request/response bodies for all 10 public cases are in
 [`samples/public_cases.json`](samples/public_cases.json).
 
-### Automated test suite
+### Tests
 
-Four scripts, from fastest/most-offline to full end-to-end:
-
-```bash
-# 1. Deterministic core only (guardrails + LP optimizer + replay validator).
-#    No API key or network needed. Feeds each public sample's published ground-truth
-#    directive_interpretation through the real guardrail/optimizer/validator code and
-#    checks every plan is constraint-valid with quality_ratio == 1.0 against the reference.
-python -m tests.run_offline_checks
-
-# 2. Full HTTP layer (FastAPI in-process) with NO API key — exercises /health, malformed-JSON
-#    handling, schema validation, and the fallback-interpreter safety net end-to-end.
-python -m tests.run_no_key_smoke
-
-# 3. Full HTTP layer WITH a real GROQ_API_KEY set in .env — exercises the actual LLM
-#    interpretation path against all 10 public samples and prints per-case latency.
-python -m tests.run_api_smoke
-
-# 4. Adversarial paraphrase-robustness self-test. Generates several fresh, differently-worded
-#    paraphrases of every ground-truth operator note (never seen by the interpreter before)
-#    and checks each still resolves to the correct directive_type/hours/value — a stand-in for
-#    the hidden judge set's paraphrase robustness scoring, run against our own prompt.
-python -m tests.run_paraphrase_robustness
-```
-
-Expected result for (1) and (2): `10/10 cases passed`. Tests (3) and (4) require network
-access and a valid key; last verified run of (4): **46/48 (95.8%) freshly-generated
-paraphrases** resolved to the correct ground-truth directive — the 2 misses were both
-simultaneous Groq+Gemini rate-limit/availability errors, not interpretation mistakes.
-
-**Live deployment verified end-to-end** (last run against `https://gridwise-optimizer.onrender.com`):
-all 10 public samples returned the correct cost with the real LLM path, 3 malformed-input
-cases (invalid JSON, missing fields, wrong top-level type) all returned a clean `400` with no
-stack trace leak, and **p95 latency was 1.88s / max 1.94s** — well inside the 5s tier for full
-latency credit and far under the 30s per-request judge timeout.
+The `tests/` folder covers guardrails, the optimizer, and the full API path.
+Use the project test commands to run the relevant checks locally.
 
 ## Docker fallback image
 
@@ -239,37 +195,7 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
 
 ## Known limitations
 
-- **Fallback interpreter is a safety net, not a substitute for the LLM.** It only activates
-  when BOTH Groq and Gemini fail (bad/missing key, network/timeout error, non-JSON response).
-  It uses simple regex/keyword matching and will not generalize to arbitrary paraphrasing the
-  way the LLM does — its purpose is solely to avoid a 5xx / crash during a total provider
-  outage. It is disabled (never invoked) whenever either LLM call succeeds. Every entry it
-  emits is tagged in `explanation` for auditability.
-- **Overlapping directives of the same type** (e.g. two `solar_reduction` notes touching the
-  same hour) are composed conservatively: `solar_reduction` factors multiply, and
-  `minimum_battery_reserve` / `max_grid_window` take the most restrictive (max / min) value
-  per hour. The Problem Statement does not specify this case explicitly; organizer-valid
-  scenarios are stated not to require contradictory hard directives, so this is a defensive
-  default rather than a documented contract requirement.
-- **Infeasibility relaxation** (see "Optimizer & solver" above) only engages for malformed or
-  adversarial input where directives are mutually infeasible; it should never trigger on a
-  valid organizer scenario.
-- No secrets, raw prompts containing secrets, or stack traces are ever included in API
-  responses; unhandled errors return a generic `{"error": "internal_error"}` and log full
-  detail server-side only.
-- **Free-tier Groq rate limit.** The default free `on_demand` tier caps `openai/gpt-oss-120b`
-  at 8000 tokens/minute (~6-8 interpretation calls/minute at this prompt size). A burst of
-  requests beyond that returns HTTP 429 from Groq; the Gemini secondary provider absorbs most
-  of this (still a real LLM interpretation), and only if Gemini also fails does the
-  deterministic fallback interpreter take over for that one request (tagged in `explanation`),
-  so the service always returns a valid 200 response rather than failing. Upgrade to a paid/dev
-  tier on console.groq.com for higher throughput if sustained high request rates are expected.
-  A 20-request burst test against `gemini-3.1-flash-lite` found no comparable hard per-minute
-  quota — occasional failures there were transient upstream 503s/timeouts rather than a rate
-  limit, so Gemini rarely fails at the same moment Groq is rate-limited.
-
-## Credits
-
-Built with FastAPI, PuLP/CBC, and the Groq (GPT-OSS 120B) / Gemini (3.1 Flash-Lite) APIs.
-Core architecture, prompt design,
-guardrail logic, LP formulation, and validator are original work for this challenge.
+- The fallback interpreter uses simple keyword and regex matching when both LLM providers fail.
+- Overlapping directives are combined using conservative per-hour rules.
+- Infeasible directive combinations trigger the documented relaxation fallback.
+- API responses do not include secrets or stack traces; detailed errors are logged server-side.
