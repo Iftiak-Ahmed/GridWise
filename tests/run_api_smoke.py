@@ -1,6 +1,6 @@
 """End-to-end smoke test through the real FastAPI app, including the live LLM call.
 
-Requires ANTHROPIC_API_KEY to be set (loaded from .env). Runs the public samples through
+Requires GROQ_API_KEY to be set (loaded from .env). Runs the public samples through
 the actual /optimize-energy handler (in-process, no server needed) and replays each
 returned plan with the independent validator to confirm downstream application, not just
 schema shape.
@@ -20,15 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient
 
 from app import validator
-from app.config import ANTHROPIC_API_KEY
+from app.config import GROQ_API_KEY
 from app.main import app
 
 SAMPLES_PATH = Path(__file__).resolve().parent.parent / "samples" / "public_cases.json"
 
 
 def main() -> int:
-    if not ANTHROPIC_API_KEY:
-        print("ANTHROPIC_API_KEY is not set — skipping live LLM smoke test.")
+    if not GROQ_API_KEY:
+        print("GROQ_API_KEY is not set — skipping live LLM smoke test.")
         print("Set it in .env to exercise the real interpretation path.")
         return 0
 

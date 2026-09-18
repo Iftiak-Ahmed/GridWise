@@ -7,7 +7,7 @@ validation, the LP optimizer, and the replay validator — is correct against ev
 public sample: every plan must be constraint-valid and cost-competitive with the
 published reference.
 
-It does NOT test the LLM's natural-language understanding; that requires ANTHROPIC_API_KEY
+It does NOT test the LLM's natural-language understanding; that requires GROQ_API_KEY
 and is covered by tests/run_api_smoke.py instead.
 
 Usage:

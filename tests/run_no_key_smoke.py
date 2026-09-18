@@ -1,4 +1,4 @@
-"""Smoke test of the full HTTP layer with NO Anthropic API key configured.
+"""Smoke test of the full HTTP layer with NO Groq API key configured.
 
 This exercises exactly the "provider unavailable" path every request will take in this
 sandbox: LLMUnavailableError -> fallback_interpreter -> guardrails -> optimizer -> validator

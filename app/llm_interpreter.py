@@ -15,9 +15,11 @@ import json
 import re
 from typing import Any
 
-import anthropic
+import httpx
 
-from app.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL, LLM_TIMEOUT_SECONDS
+from app.config import GROQ_API_KEY, GROQ_MODEL, LLM_TIMEOUT_SECONDS
+
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 SYSTEM_PROMPT = """You are the operator-note interpretation engine for GridWise, a campus \
 energy scheduling system. You convert short natural-language operator notes into strict \
@@ -96,37 +98,48 @@ def interpret_notes(operator_notes: list[str], battery_capacity_kwh: float) -> l
     provider responded but the payload could not be parsed as JSON at all (also treated
     by the caller as a reason to fall back, since we must never invent data ourselves).
     """
-    if not ANTHROPIC_API_KEY:
-        raise LLMUnavailableError("ANTHROPIC_API_KEY is not configured")
+    if not GROQ_API_KEY:
+        raise LLMUnavailableError("GROQ_API_KEY is not configured")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=LLM_TIMEOUT_SECONDS, max_retries=1)
+    payload = {
+        "model": GROQ_MODEL,
+        "temperature": 0,
+        "max_tokens": 1536,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_message(operator_notes, battery_capacity_kwh)},
+        ],
+    }
 
     try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=1536,
-            temperature=0,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": _build_user_message(operator_notes, battery_capacity_kwh)}
-            ],
+        response = httpx.post(
+            GROQ_CHAT_COMPLETIONS_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=LLM_TIMEOUT_SECONDS,
         )
-    except anthropic.APIError as exc:
-        raise LLMUnavailableError(f"Anthropic API error: {exc.__class__.__name__}") from exc
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise LLMUnavailableError(
+            f"Groq API error: HTTP {exc.response.status_code} {exc.response.text[:200]}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - any transport/timeout failure -> fallback path
         raise LLMUnavailableError(f"LLM call failed: {exc.__class__.__name__}") from exc
 
-    raw_text = "".join(
-        block.text for block in response.content if getattr(block, "type", None) == "text"
-    )
+    try:
+        raw_text = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise LLMUnavailableError(f"Groq response missing expected content: {exc}") from exc
+
     cleaned = _strip_fences(raw_text)
 
     try:
-        payload = json.loads(cleaned)
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise LLMUnavailableError(f"LLM returned non-JSON output: {exc}") from exc
 
-    interpretations = payload.get("interpretations")
+    interpretations = parsed.get("interpretations")
     if not isinstance(interpretations, list):
         raise LLMUnavailableError("LLM JSON payload missing 'interpretations' array")
 

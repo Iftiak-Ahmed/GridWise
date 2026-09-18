@@ -11,7 +11,7 @@ solves an exact linear program to produce a minimum-cost, constraint-valid 24-ho
 Energy Data + Operator Notes
         |
         v
-  LLM Interpreter        <- Anthropic Claude (Haiku 4.5 by default)
+  LLM Interpreter        <- Groq (GPT-OSS 120B by default)
         |                    the ONLY component allowed to decide what a note means
         v
   Guardrail Validator     <- deterministic Python; forces malformed/unsupported output
@@ -27,7 +27,7 @@ Energy Data + Operator Notes
 ```
 
 - **`app/llm_interpreter.py`** — the mandatory LLM step (Participant Guide Sec. 04). Sends all
-  of a scenario's operator notes to Claude in one call and asks for strict JSON back. This is
+  of a scenario's operator notes to the LLM in one call and asks for strict JSON back. This is
   the only place that performs natural-language understanding; nothing downstream re-interprets
   the notes.
 - **`app/guardrails.py`** — treats the LLM's JSON as untrusted. Every entry is checked against
@@ -49,16 +49,16 @@ Energy Data + Operator Notes
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | — | API key for the LLM used to interpret `operator_notes`. |
-| `ANTHROPIC_MODEL` | No | `claude-haiku-4-5-20251001` | Model id for interpretation. |
+| `GROQ_API_KEY` | Yes | — | API key for the LLM used to interpret `operator_notes`. Free, no card required — get one at [console.groq.com/keys](https://console.groq.com/keys). |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Model id for interpretation. |
 | `LLM_TIMEOUT_SECONDS` | No | `12` | Per-call timeout budget for the LLM request. |
 | `PORT` | No | `8000` | Port the HTTP server binds to. |
 
-Copy `.env.example` to `.env` and fill in `ANTHROPIC_API_KEY`. **Never commit `.env`.**
+Copy `.env.example` to `.env` and fill in `GROQ_API_KEY`. **Never commit `.env`.**
 
 ## LLM role & guardrails (summary)
 
-The LLM (Anthropic Claude) is given the directive-type spec and every operator note in one
+The LLM (GPT-OSS 120B via Groq) is given the directive-type spec and every operator note in one
 call, and returns one structured interpretation per note as JSON. Its output is never trusted
 directly:
 
@@ -111,7 +111,7 @@ pip install -r requirements.txt
 
 # 3. Configure environment variables
 copy .env.example .env
-# then edit .env and set ANTHROPIC_API_KEY
+# then edit .env and set GROQ_API_KEY
 
 # 4. Run the service
 uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -170,7 +170,7 @@ python -m tests.run_offline_checks
 #    handling, schema validation, and the fallback-interpreter safety net end-to-end.
 python -m tests.run_no_key_smoke
 
-# 3. Full HTTP layer WITH a real ANTHROPIC_API_KEY set in .env — exercises the actual LLM
+# 3. Full HTTP layer WITH a real GROQ_API_KEY set in .env — exercises the actual LLM
 #    interpretation path against all 10 public samples and prints per-case latency.
 python -m tests.run_api_smoke
 ```
@@ -187,8 +187,8 @@ docker build -t gridwise-optimizer:latest .
 
 # Run (no secrets baked into the image — pass the key at runtime)
 docker run --rm -p 8000:8000 \
-  -e ANTHROPIC_API_KEY=your_key_here \
-  -e ANTHROPIC_MODEL=claude-haiku-4-5-20251001 \
+  -e GROQ_API_KEY=your_key_here \
+  -e GROQ_MODEL=openai/gpt-oss-120b \
   gridwise-optimizer:latest
 
 # Verify
@@ -196,7 +196,7 @@ curl http://localhost:8000/health
 ```
 
 The image binds to `0.0.0.0:${PORT}` (default `8000`), matches the documented port, and
-contains no baked-in credentials — `ANTHROPIC_API_KEY` must be supplied via `-e` or your
+contains no baked-in credentials — `GROQ_API_KEY` must be supplied via `-e` or your
 platform's secret-injection mechanism at runtime.
 
 Published image:
@@ -213,14 +213,14 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
 
 - [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) — HTTP service.
 - [Pydantic v2](https://docs.pydantic.dev/) — request/response schema validation.
-- [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) — LLM calls.
+- [Groq API](https://console.groq.com/docs) (OpenAI-compatible, called via `httpx`) — LLM calls.
 - [PuLP](https://coin-or.github.io/pulp/) + CBC — the deterministic LP optimizer/solver.
 - [python-dotenv](https://github.com/theskumar/python-dotenv) — loads `.env` locally.
 
 ## Known limitations
 
 - **Fallback interpreter is a safety net, not a substitute for the LLM.** It only activates
-  when the Anthropic API call itself fails (bad/missing key, network/timeout error, non-JSON
+  when the Groq API call itself fails (bad/missing key, network/timeout error, non-JSON
   response). It uses simple regex/keyword matching and will not generalize to arbitrary
   paraphrasing the way the LLM does — its purpose is solely to avoid a 5xx / crash during a
   provider outage. It is disabled (never invoked) whenever the LLM call succeeds. Every entry
@@ -237,8 +237,15 @@ Verified locally: built with `docker build`, run with `docker run -p 8000:8000`,
 - No secrets, raw prompts containing secrets, or stack traces are ever included in API
   responses; unhandled errors return a generic `{"error": "internal_error"}` and log full
   detail server-side only.
+- **Free-tier Groq rate limit.** The default free `on_demand` tier caps `openai/gpt-oss-120b`
+  at 8000 tokens/minute (~6-8 interpretation calls/minute at this prompt size). A burst of
+  requests beyond that returns HTTP 429 from Groq, which is treated the same as any other LLM
+  outage: the deterministic fallback interpreter takes over for that request only (tagged in
+  `explanation`), so the service still returns a valid 200 response rather than failing. Upgrade
+  to a paid/dev tier on console.groq.com for higher throughput if sustained high request rates
+  are expected during judging.
 
 ## Credits
 
-Built with FastAPI, PuLP/CBC, and the Anthropic Claude API. Core architecture, prompt design,
+Built with FastAPI, PuLP/CBC, and the Groq API (GPT-OSS 120B). Core architecture, prompt design,
 guardrail logic, LP formulation, and validator are original work for this challenge.

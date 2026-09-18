@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# No secrets are baked into the image; ANTHROPIC_API_KEY is injected at `docker run` time.
+# No secrets are baked into the image; GROQ_API_KEY is injected at `docker run` time.
 ENV PORT=8000
 EXPOSE 8000
 
