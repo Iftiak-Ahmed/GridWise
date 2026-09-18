@@ -50,6 +50,20 @@ async def generic_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": "internal_error"})
 
 
+@app.get("/")
+async def root() -> dict:
+    return {
+        "service": "GridWise Optimizer",
+        "status": "ok",
+        "endpoints": {
+            "health": "GET /health",
+            "optimize": "POST /optimize-energy",
+            "interactive_docs": "GET /docs",
+        },
+        "repository": "https://github.com/Iftiak-Ahmed/GridWise",
+    }
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
