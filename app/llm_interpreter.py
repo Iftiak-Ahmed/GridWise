@@ -67,7 +67,17 @@ about something unrelated to demand, solar, battery, or grid import for the curr
 
 Hour convention: hours are whole-hour, 0-23, start-inclusive and end-exclusive. \
 "1 PM to 3 PM" -> hours [13, 14] (NOT [13,14,15]). "6 PM until 9 PM" -> [18,19,20]. \
-Always return hours as unique integers in ascending order.
+Always return hours as unique integers in ascending order. This convention applies no matter \
+how the time is phrased:
+- 24-hour/military clock: "13:00 to 15:00" -> [13,14]. "18:00-21:00" -> [18,19,20].
+- "noon" = hour 12. "midnight" = hour 0. "noon to 2 PM" -> [12,13]. "10 PM until midnight" \
+  -> [22,23].
+- "from X o'clock" without AM/PM: infer from context (campus daytime activity, other hours \
+  in the note, typical operating hours) which of the two 12-hour readings is meant; if truly \
+  ambiguous, still pick the single most plausible reading rather than refusing.
+- Vague relative periods with no explicit hour given (e.g. "this afternoon", "overnight", \
+  "later today") and no other way to pin down specific hours: treat as no_op rather than \
+  guessing arbitrary hours, since inventing an hour range here would be fabricating data.
 
 Do not invent demand, solar, tariff, or battery parameters. Do not use any directive type \
 other than the six listed above. Do not merge multiple notes into one entry.
@@ -116,27 +126,23 @@ def _parse_interpretations(raw_text: str, provider: str) -> list[dict[str, Any]]
     return interpretations
 
 
-def _call_groq(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
-    if not GROQ_API_KEY:
-        raise LLMUnavailableError("GROQ_API_KEY is not configured")
+_GROQ_REPAIR_TIMEOUT_SECONDS = 4.0
 
+
+def _groq_request(messages: list[dict[str, str]], timeout: float) -> str:
     payload = {
         "model": GROQ_MODEL,
         "temperature": 0,
         "max_tokens": 1536,
         "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_message(operator_notes, battery_capacity_kwh)},
-        ],
+        "messages": messages,
     }
-
     try:
         response = httpx.post(
             GROQ_CHAT_COMPLETIONS_URL,
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json=payload,
-            timeout=GROQ_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -147,11 +153,40 @@ def _call_groq(operator_notes: list[str], battery_capacity_kwh: float) -> list[d
         raise LLMUnavailableError(f"Groq call failed: {exc.__class__.__name__}") from exc
 
     try:
-        raw_text = response.json()["choices"][0]["message"]["content"]
+        return response.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise LLMUnavailableError(f"Groq response missing expected content: {exc}") from exc
 
-    return _parse_interpretations(raw_text, "Groq")
+
+def _call_groq(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:
+    if not GROQ_API_KEY:
+        raise LLMUnavailableError("GROQ_API_KEY is not configured")
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _build_user_message(operator_notes, battery_capacity_kwh)},
+    ]
+
+    raw_text = _groq_request(messages, GROQ_TIMEOUT_SECONDS)
+    try:
+        return _parse_interpretations(raw_text, "Groq")
+    except LLMUnavailableError:
+        # The model returned syntactically-invalid JSON or the wrong shape despite JSON mode
+        # being requested (rare). One short, cheap repair attempt before giving up on Groq
+        # entirely — bounded tightly so the combined Groq path still leaves ample time for the
+        # Gemini fallback within the 30s judge timeout.
+        repair_messages = messages + [
+            {"role": "assistant", "content": raw_text},
+            {
+                "role": "user",
+                "content": (
+                    "That response was not a single valid JSON object of the exact required "
+                    "shape. Return ONLY the corrected JSON object now, no commentary."
+                ),
+            },
+        ]
+        raw_text_retry = _groq_request(repair_messages, _GROQ_REPAIR_TIMEOUT_SECONDS)
+        return _parse_interpretations(raw_text_retry, "Groq (repair retry)")
 
 
 def _call_gemini(operator_notes: list[str], battery_capacity_kwh: float) -> list[dict[str, Any]]:

@@ -17,18 +17,53 @@ def _is_finite_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
+def _coerce_number(x: Any) -> float | None:
+    """Tolerates minor LLM formatting variance (e.g. "0.2" or 100.0) without inventing a value.
+
+    Only ever narrows a value the model already gave us into a canonical float; never
+    substitutes a default or guesses a missing value.
+    """
+    if _is_finite_number(x):
+        return float(x)
+    if isinstance(x, str):
+        try:
+            parsed = float(x.strip())
+        except ValueError:
+            return None
+        return parsed if math.isfinite(parsed) else None
+    return None
+
+
+def _coerce_hour(h: Any) -> int | None:
+    """Tolerates an hour given as 13.0 or "13" while rejecting genuinely fractional/invalid
+    values (e.g. 13.5) — normalizing representation, never inventing or rounding data.
+    """
+    if isinstance(h, bool):
+        return None
+    if isinstance(h, int):
+        return h
+    if isinstance(h, float) and h.is_integer():
+        return int(h)
+    if isinstance(h, str):
+        try:
+            parsed = int(h.strip())
+        except ValueError:
+            return None
+        return parsed
+    return None
+
+
 def _valid_hours(hours: Any) -> list[int] | None:
     if not isinstance(hours, list) or len(hours) == 0:
         return None
-    if not all(isinstance(h, int) and not isinstance(h, bool) for h in hours):
+    coerced = [_coerce_hour(h) for h in hours]
+    if any(h is None for h in coerced):
         return None
-    if any(h < 0 or h > 23 for h in hours):
+    if any(h < 0 or h > 23 for h in coerced):
         return None
-    if len(set(hours)) != len(hours):
-        return None
-    if hours != sorted(hours):
-        return None
-    return hours
+    # Normalize order/duplicates rather than rejecting outright — the model already gave us
+    # every hour value; deduping and sorting is formatting cleanup, not invented data.
+    return sorted(set(coerced))
 
 
 def _safe_no_op(note_index: int, reason: str) -> dict[str, Any]:
@@ -52,16 +87,16 @@ def _validate_structured_adjustment(
         return None
 
     if directive_type == "solar_reduction":
-        factor = adjustment.get("factor")
-        if not _is_finite_number(factor) or factor < 0 or factor > 1:
+        factor = _coerce_number(adjustment.get("factor"))
+        if factor is None or factor < 0 or factor > 1:
             return None
-        return {"hours": hours, "factor": float(factor)}
+        return {"hours": hours, "factor": factor}
 
     if directive_type == "minimum_battery_reserve":
-        reserve = adjustment.get("minimum_energy_kwh")
-        if not _is_finite_number(reserve) or reserve < 0 or reserve > battery_capacity_kwh:
+        reserve = _coerce_number(adjustment.get("minimum_energy_kwh"))
+        if reserve is None or reserve < 0 or reserve > battery_capacity_kwh:
             return None
-        return {"hours": hours, "minimum_energy_kwh": float(reserve)}
+        return {"hours": hours, "minimum_energy_kwh": reserve}
 
     if directive_type == "no_charge_window":
         return {"hours": hours}
@@ -70,10 +105,10 @@ def _validate_structured_adjustment(
         return {"hours": hours}
 
     if directive_type == "max_grid_window":
-        cap = adjustment.get("max_grid_kwh")
-        if not _is_finite_number(cap) or cap < 0:
+        cap = _coerce_number(adjustment.get("max_grid_kwh"))
+        if cap is None or cap < 0:
             return None
-        return {"hours": hours, "max_grid_kwh": float(cap)}
+        return {"hours": hours, "max_grid_kwh": cap}
 
     return None
 
