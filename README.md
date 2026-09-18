@@ -5,6 +5,9 @@ challenge. It exposes `GET /health` and `POST /optimize-energy`, interprets natu
 operator notes with a language model, deterministically guardrails that interpretation, and
 solves an exact linear program to produce a minimum-cost, constraint-valid 24-hour schedule.
 
+**Live public endpoint:** `https://gridwise-optimizer.onrender.com`
+(`GET /health`, `POST /optimize-energy` — no login/VPN required)
+
 ## Architecture
 
 ```
@@ -203,7 +206,7 @@ Published image:
 
 ```
 docker pull turzaiftiak/gridwise-optimizer:latest
-# digest: sha256:4a5d4b9249b0172f5eaad804274b98842e9c91d243f8ee4242a49cced86e6b25
+# digest: sha256:e12eb5f3cd8189e9db992bb4640f007d76d3da3d17ff716d808e1c2b8ad2788d
 ```
 
 Verified locally: built with `docker build`, run with `docker run -p 8000:8000`, and
